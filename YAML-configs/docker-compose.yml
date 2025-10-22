@@ -1,0 +1,289 @@
+# ============================================================================
+# Docker Compose - Authentik/Proxy Stack
+# ============================================================================
+# Location: /opt/homelab/docker-compose.yaml
+# Data Location: /opt/docker-data/
+# 
+# Services:
+# - Traefik (Reverse Proxy with HTTP & DNS ACME challenges)
+# - Cloudflared (Cloudflare Tunnel for secure external access)
+# - Authentik (SSO/Identity Provider)
+# - PostgreSQL (Database for Authentik)
+# - Redis (Cache for Authentik)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Networks
+# ----------------------------------------------------------------------------
+networks:
+  # Main network for Traefik and services
+  traefik_backend:
+    driver: bridge
+  
+  # Internal network for Authentik components
+  authentik_internal:
+    driver: bridge
+  
+  # Network for Cloudflare Tunnel
+  tunnel-net:
+    driver: bridge
+
+# ----------------------------------------------------------------------------
+# Services
+# ----------------------------------------------------------------------------
+services:
+  
+  # ==========================================================================
+  # Traefik Reverse Proxy
+  # ==========================================================================
+  # Handles routing, SSL certificates, and authentication middleware
+  traefik:
+    image: traefik:latest
+    container_name: traefik-se
+    restart: unless-stopped
+    
+    # Security
+    security_opt:
+      - no-new-privileges:true
+    
+    # Networks
+    networks:
+      - traefik_backend
+    
+    # Ports
+    ports:
+      - "80:80"    # HTTP (redirects to HTTPS)
+      - "443:443"  # HTTPS
+    
+    # Volumes
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /opt/docker-data/traefik/traefik.yaml:/etc/traefik/traefik.yaml:ro
+      - /opt/docker-data/traefik/config/dynamic:/etc/traefik/dynamic:ro
+      - /opt/docker-data/traefik/logs:/var/log/traefik
+      - /opt/docker-data/traefik/letsencrypt:/letsencrypt
+    
+    # Environment Variables
+    environment:
+      # Cloudflare DNS API Token for DNS-01 ACME challenge
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+    
+    # Load additional environment variables from .env
+    env_file:
+      - .env
+    
+    # Traefik Labels - Dashboard Configuration
+    labels:
+      # Enable Traefik for this container
+      - "traefik.enable=true"
+      
+      # Router Configuration
+      - "traefik.http.routers.traefik.rule=Host(`traefik.homelab.net`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt-dns"
+      - "traefik.http.routers.traefik.service=api@internal"
+      - "traefik.http.services.traefik.loadBalancer.server.port=8080"
+      
+      # Middleware - Authentik Forward Auth
+      - "traefik.http.routers.traefik.middlewares=authentik@file"
+
+  # ==========================================================================
+  # Cloudflared Tunnel
+  # ==========================================================================
+  # Provides secure tunnel to Cloudflare for external access
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    
+    # Command
+    command: tunnel run
+    
+    # Networks
+    networks:
+      - tunnel-net
+      - traefik_backend  # Connect to Traefik for routing
+    
+    # Environment Variables
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TOKEN}
+    
+    # Load additional environment variables from .env
+    env_file:
+      - .env
+
+  # ==========================================================================
+  # PostgreSQL Database
+  # ==========================================================================
+  # Database backend for Authentik
+  postgresql:
+    image: postgres:16-alpine
+    container_name: authentik-postgres
+    restart: unless-stopped
+    
+    # Health Check
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 5s
+    
+    # Networks
+    networks:
+      - authentik_internal
+    
+    # Volumes
+    volumes:
+      - /opt/docker-data/authentik/database:/var/lib/postgresql/data
+    
+    # Environment Variables
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER:-authentik}
+      POSTGRES_DB: ${POSTGRES_DB:-authentik}
+    
+    # Load additional environment variables from .env
+    env_file:
+      - .env
+
+  # ==========================================================================
+  # Redis Cache
+  # ==========================================================================
+  # Cache and message broker for Authentik
+  redis:
+    image: redis:alpine
+    container_name: authentik-redis
+    restart: unless-stopped
+    
+    # Command
+    command: --save 60 1 --loglevel warning
+    
+    # Health Check
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      start_period: 20s
+      interval: 30s
+      retries: 5
+      timeout: 3s
+    
+    # Networks
+    networks:
+      - authentik_internal
+    
+    # Volumes
+    volumes:
+      - /opt/docker-data/authentik/redis:/data
+
+  # ==========================================================================
+  # Authentik Server
+  # ==========================================================================
+  # SSO and Identity Provider - Main server process
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2025.8
+    container_name: authentik-server
+    restart: unless-stopped
+    
+    # Command
+    command: server
+    
+    # Networks
+    networks:
+      - authentik_internal
+      - traefik_backend    
+
+    # Volumes
+    volumes:
+      - /opt/docker-data/authentik/media:/media
+      - /opt/docker-data/authentik/templates:/templates
+    
+    # Environment Variables
+    environment:
+      # Redis Configuration
+      AUTHENTIK_REDIS__HOST: redis
+      
+      # PostgreSQL Configuration
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
+      
+      # Authentik Secret Key
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+    
+    # Load additional environment variables from .env
+    env_file:
+      - .env
+    
+    # Dependencies
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    
+    # Traefik Labels - Authentik Web Interface
+    labels:
+      # Enable Traefik for this container
+      - "traefik.enable=true"
+      
+      # Router Configuration
+      - "traefik.http.routers.authentik.rule=Host(`auth.homelab.net`)"
+      - "traefik.http.routers.authentik.entrypoints=websecure"
+      - "traefik.http.routers.authentik.tls.certresolver=letsencrypt-dns"
+      - "traefik.http.routers.authentik.priority=10"
+      
+      # Service Configuration
+      - "traefik.http.routers.authentik.service=authentik-svc"
+      - "traefik.http.services.authentik-svc.loadbalancer.server.port=9000"
+
+  # ==========================================================================
+  # Authentik Worker
+  # ==========================================================================
+  # SSO and Identity Provider - Background worker process
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2025.8
+    container_name: authentik-worker
+    restart: unless-stopped
+    
+    # Command
+    command: worker
+    
+    # Networks
+    networks:
+      - authentik_internal
+    
+    # Volumes
+    volumes:
+      - /opt/docker-data/authentik/media:/media
+      - /opt/docker-data/authentik/certs:/certs
+      - /opt/docker-data/authentik/templates:/templates
+    
+    # Environment Variables
+    environment:
+      # Redis Configuration
+      AUTHENTIK_REDIS__HOST: redis
+      
+      # PostgreSQL Configuration
+      AUTHENTIK_POSTGRESQL__HOST: postgresql
+      AUTHENTIK_POSTGRESQL__USER: ${POSTGRES_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${POSTGRES_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD}
+      
+      # Authentik Secret Key
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+    
+    # Load additional environment variables from .env
+    env_file:
+      - .env
+    
+    # Dependencies
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+# ============================================================================
+# End of Configuration
+# ====================================================================================================

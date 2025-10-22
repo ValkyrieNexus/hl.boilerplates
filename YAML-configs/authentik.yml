@@ -1,0 +1,229 @@
+# ============================================================================
+# Traefik Dynamic Configuration - Authentik Forward Auth
+# ============================================================================
+# Location: /opt/docker-data/traefik/config/dynamic/authentik.yaml
+# 
+# This file configures Authentik as a forward authentication provider for
+# Traefik, enabling SSO (Single Sign-On) for all protected services.
+#
+# How it works:
+# 1. User requests protected service (e.g., portainer.valkyrienexus.net)
+# 2. Traefik intercepts request and forwards to Authentik
+# 3. Authentik checks if user is authenticated
+# 4. If not authenticated ? Redirect to Authentik login
+# 5. If authenticated ? Forward to original service
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# HTTP Configuration
+# ----------------------------------------------------------------------------
+http:
+  
+  # ==========================================================================
+  # Middlewares
+  # ==========================================================================
+  middlewares:
+    
+    # ------------------------------------------------------------------------
+    # Authentik Forward Auth Middleware
+    # ------------------------------------------------------------------------
+    # This middleware handles authentication for all protected services
+    authentik:
+      forwardAuth:
+        # Authentik outpost endpoint
+        address: http://authentik-server:9000/outpost.goauthentik.io/auth/traefik
+        
+        # Trust forward headers from Authentik
+        trustForwardHeader: true
+        
+        # Headers to forward to Authentik for authentication
+        authResponseHeaders:
+          - X-authentik-username
+          - X-authentik-groups
+          - X-authentik-email
+          - X-authentik-name
+          - X-authentik-uid
+          - X-authentik-jwt
+          - X-authentik-meta-jwks
+          - X-authentik-meta-outpost
+          - X-authentik-meta-provider
+          - X-authentik-meta-app
+          - X-authentik-meta-version
+    
+    # ------------------------------------------------------------------------
+    # Security Headers Middleware
+    # ------------------------------------------------------------------------
+    # Adds security headers to all responses
+    security-headers:
+      headers:
+        # Force HTTPS
+        sslRedirect: true
+        sslForceHost: true
+        
+        # HSTS (HTTP Strict Transport Security)
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: true
+        
+        # Prevent clickjacking
+        frameDeny: true
+        
+        # XSS Protection
+        browserXssFilter: true
+        
+        # Content Type Options
+        contentTypeNosniff: true
+        
+        # Referrer Policy
+        referrerPolicy: "strict-origin-when-cross-origin"
+        
+        # Permissions Policy
+        permissionsPolicy: "geolocation=(self), microphone=(), camera=()"
+        
+        # Custom Security Headers
+        customResponseHeaders:
+          X-Robots-Tag: "noindex, nofollow"
+    
+    # ------------------------------------------------------------------------
+    # Rate Limiting Middleware
+    # ------------------------------------------------------------------------
+    # Protects against brute force and DoS attacks
+    rate-limit:
+      rateLimit:
+        average: 100      # Average requests per second
+        burst: 50         # Maximum burst size
+        period: 1s        # Time period for rate calculation
+    
+    # ------------------------------------------------------------------------
+    # CORS Headers Middleware (Optional)
+    # ------------------------------------------------------------------------
+    # Uncomment if you need CORS support for API services
+    # cors-headers:
+    #   headers:
+    #     accessControlAllowMethods:
+    #       - GET
+    #       - POST
+    #       - PUT
+    #       - DELETE
+    #       - OPTIONS
+    #     accessControlAllowOriginList:
+    #       - "https://your-url-here.net"
+    #       - "https://*.your-url-here.net"
+    #     accessControlMaxAge: 100
+    #     addVaryHeader: true
+    
+    # ------------------------------------------------------------------------
+    # Compression Middleware
+    # ------------------------------------------------------------------------
+    # Compresses responses for better performance
+    compression:
+      compress:
+        excludedContentTypes:
+          - "text/event-stream"
+    
+    # ------------------------------------------------------------------------
+    # Chain Middlewares (Combine Multiple)
+    # ------------------------------------------------------------------------
+    # Use this to apply both Authentik auth and security headers
+    authentik-secure:
+      chain:
+        middlewares:
+          - authentik
+          - security-headers
+          - compression
+    
+    # For public services that need security but not authentication
+    public-secure:
+      chain:
+        middlewares:
+          - security-headers
+          - compression
+          - rate-limit
+
+  # ==========================================================================
+  # Services (Optional - for custom configurations)
+  # ==========================================================================
+  # services:
+  #   
+  #   # Example: Custom Authentik service configuration
+  #   authentik-svc:
+  #     loadBalancer:
+  #       servers:
+  #         - url: "http://authentik-server:9000"
+  #       healthCheck:
+  #         path: /
+  #         interval: "10s"
+  #         timeout: "3s"
+
+# ============================================================================
+# TCP Configuration (Optional)
+# ============================================================================
+# Uncomment if you need TCP routing
+# tcp:
+#   routers:
+#     # Example TCP router
+#   services:
+#     # Example TCP service
+
+# ============================================================================
+# TLS Configuration (Optional)
+# ============================================================================
+# tls:
+#   options:
+#     # Modern TLS configuration
+#     modern:
+#       minVersion: VersionTLS13
+#       sniStrict: true
+#     
+#     # Default TLS configuration
+#     default:
+#       minVersion: VersionTLS12
+#       cipherSuites:
+#         - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+#         - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+#         - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+#       curvePreferences:
+#         - CurveP521
+#         - CurveP384
+
+# ============================================================================
+# Usage Examples
+# ============================================================================
+# 
+# In your docker-compose.yaml, add labels to services:
+#
+# Example 1: Protected service with Authentik authentication
+# labels:
+#   - "traefik.enable=true"
+#   - "traefik.http.routers.portainer.rule=Host(`portainer.hl.homelab.net`)"
+#   - "traefik.http.routers.portainer.entrypoints=websecure"
+#   - "traefik.http.routers.portainer.tls.certresolver=letsencrypt"
+#   - "traefik.http.routers.portainer.middlewares=authentik-secure@file"
+#
+# Example 2: Public service with security headers only
+# labels:
+#   - "traefik.enable=true"
+#   - "traefik.http.routers.website.rule=Host(`www.homelab.net`)"
+#   - "traefik.http.routers.website.entrypoints=websecure"
+#   - "traefik.http.routers.website.tls.certresolver=letsencrypt"
+#   - "traefik.http.routers.website.middlewares=public-secure@file"
+#
+# Example 3: Service with authentication only (no extra security headers)
+# labels:
+#   - "traefik.http.routers.service.middlewares=authentik@file"
+#
+# ============================================================================
+# Middleware Reference Guide
+# ============================================================================
+#
+# Available Middlewares:
+# - authentik@file              ? Authentik authentication only
+# - security-headers@file       ? Security headers only
+# - rate-limit@file            ? Rate limiting only
+# - compression@file           ? Compression only
+# - authentik-secure@file      ? Auth + Security + Compression (recommended)
+# - public-secure@file         ? Security + Compression + Rate limit (for public)
+#
+# ============================================================================
+# End of Configuration
+# ============================================================================

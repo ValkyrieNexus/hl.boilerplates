@@ -1,0 +1,95 @@
+# ============================================================================
+# Traefik Static Configuration
+# ============================================================================
+# File Location: ./traefik/traefik.yaml
+# 
+# This configuration supports both HTTP and DNS ACME challenges:
+# - HTTP Challenge: For public services accessible via Cloudflare Tunnel
+# - DNS Challenge: For internal services (*.hl.homelab.net)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Global Settings
+# ----------------------------------------------------------------------------
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+# ----------------------------------------------------------------------------
+# API & Dashboard
+# ----------------------------------------------------------------------------
+api:
+  dashboard: true
+  insecure: false  # Dashboard protected by Authentik
+
+# ----------------------------------------------------------------------------
+# Entry Points
+# ----------------------------------------------------------------------------
+entryPoints:
+  # HTTP Entry Point (Port 80)
+  web:
+    address: :80
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  
+  # HTTPS Entry Point (Port 443)
+  websecure:
+    address: :443
+    # Note: certResolver moved to per-service labels for flexibility
+
+# ----------------------------------------------------------------------------
+# Certificate Resolvers - ACME (Let's Encrypt)
+# ----------------------------------------------------------------------------
+certificatesResolvers:
+  
+  # HTTP-01 Challenge - For publicly accessible services
+  # Requires: Port 80 accessible from internet
+  # Use for: Services exposed via Cloudflare Tunnel
+  letsencrypt-http:
+    acme:
+      email: admin@homelab.net
+      storage: /opt/docker-data/traefik/letsencrypt/acme-http.json
+      httpChallenge:
+        entryPoint: web
+  
+  # DNS-01 Challenge - For internal services
+  # Requires: CF_DNS_API_TOKEN environment variable
+  # Use for: Internal-only services (*.hl.homelab.net)
+  letsencrypt-dns:
+    acme:
+      email: admin@homelab.net
+      storage: /opt/docker-data/traefik/letsencrypt/acme-dns.json
+      dnsChallenge:
+        provider: cloudflare
+        resolvers:
+          - "1.1.1.1:53"
+          - "8.8.8.8:53"
+
+# ----------------------------------------------------------------------------
+# Providers
+# ----------------------------------------------------------------------------
+providers:
+  
+  # Docker Provider - Auto-discover containers with Traefik labels
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: traefik_backend
+  
+  # File Provider - Load dynamic configuration from files
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+# ----------------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------------
+log:
+  level: DEBUG  # Change to INFO or ERROR in production
+  filePath: /var/log/traefik/traefik.log
+
+accessLog:
+  filePath: /var/log/traefik/access.log
